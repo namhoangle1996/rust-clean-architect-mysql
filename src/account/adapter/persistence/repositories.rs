@@ -1,0 +1,185 @@
+use super::entities::AccountEntity;
+use super::entities::ActivityEntity;
+
+use chrono::NaiveDateTime;
+use lazy_static::lazy_static;
+use sqlx::mysql::MySqlPool;
+use std::env;
+
+lazy_static! {
+    pub static ref DATABASE_URL: String =
+        env::var("DATABASE_URL").expect("No DATABASE_URL provided");
+
+    pub static ref DB_POOL: MySqlPool =
+        MySqlPool::connect_lazy(DATABASE_URL.as_str()).expect("Could not connect to database");
+}
+
+pub struct AccountRepository {
+    pool: MySqlPool,
+}
+
+impl AccountRepository {
+    pub fn new() -> Self {
+        Self {
+            pool: DB_POOL.clone(),
+        }
+    }
+
+    pub async fn find_by_id(&self, id: i32) -> anyhow::Result<AccountEntity> {
+        println!("{:?}", id );
+        let account = sqlx::query_as!(AccountEntity, r#"SELECT * FROM accounts WHERE id =?"#, id)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(account)
+    }
+}
+
+pub struct ActivityRepository {
+    pool: MySqlPool,
+}
+
+impl ActivityRepository {
+    pub fn new() -> Self {
+        Self {
+            pool: DB_POOL.clone(),
+        }
+    }
+
+    // pub async fn find_by_id(&self, id: i64) -> anyhow::Result<Vec<ActivityEntity>> {
+    //     let activities = sqlx::query_as!(
+    //         ActivityEntity,
+    //         r#"SELECT * FROM activities WHERE id = "#,
+    //         id
+    //     )
+    //     .fetch_all(&self.pool)
+    //     .await?;
+    //     Ok(activities)
+    // }
+
+    pub async fn insert_activities(&self, activities: Vec<ActivityEntity>) -> anyhow::Result<()> {
+        let values: String = activities
+            .into_iter()
+            .map(|a| {
+                format!(
+                    "({}, \"{}\", {}, {}, {})",
+                    a.amount,
+                    a.timestamp,
+                    a.owner_account_id,
+                    a.source_account_id,
+                    a.target_account_id
+                )
+            })
+            .collect::<Vec<String>>()
+            .join(", ");
+
+        let query = format!(
+            "INSERT INTO activities (
+            amount,
+            timestamp,
+            owner_account_id,
+            source_account_id,
+            target_account_id
+        ) values {};",
+            values
+        );
+
+        sqlx::query(&query[..]).execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn find_latest_by_owner(
+        &self,
+        owner_account_id: i64,
+    ) -> anyhow::Result<Option<ActivityEntity>> {
+        let activity = sqlx::query_as!(
+            ActivityEntity,
+            r#"SELECT * FROM activities 
+            WHERE owner_account_id =?
+            ORDER BY timestamp DESC
+            LIMIT 1"#,
+            owner_account_id,
+        )
+        .fetch_one(&self.pool)
+        .await;
+
+        match activity {
+            Ok(activity) => Ok(Some(activity)),
+            Err(error) => match error {
+                sqlx::Error::RowNotFound => Ok(None),
+                _ => Err(anyhow::Error::new(error)),
+            },
+        }
+    }
+
+    pub async fn find_by_owner_since(
+        &self,
+        owner_account_id: i64,
+        since: NaiveDateTime,
+    ) -> anyhow::Result<Vec<ActivityEntity>> {
+        let activities = sqlx::query_as!(
+            ActivityEntity,
+            r#"SELECT * FROM activities 
+            WHERE owner_account_id =$1
+            AND timestamp >=
+            "#,
+            owner_account_id,
+            since,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(activities)
+    }
+    pub async fn get_deposit_balance(
+        &self,
+        account_id: i64,
+        until: NaiveDateTime,
+    ) -> anyhow::Result<f32> {
+        /*
+         *     let (is_connected,): (bool,) = sqlx::query_as("SELECT true")
+        .fetch_one(&req.state().clone().db_pool)
+        .await?;
+         * */
+        let balance: (f32,) = sqlx::query_as(
+            "
+           SELECT sum(amount) as total_amount FROM activities
+           WHERE target_account_id =?
+           AND owner_account_id =?
+           and timestamp <
+           ",
+        )
+        .bind(account_id)
+        .bind(account_id)
+        .bind(until)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(balance.0)
+    }
+
+    pub async fn get_withdrawal_balance(
+        &self,
+        account_id: i64,
+        until: NaiveDateTime,
+    ) -> anyhow::Result<f32> {
+        /*
+         *     let (is_connected,): (bool,) = sqlx::query_as("SELECT true")
+        .fetch_one(&req.state().clone().db_pool)
+        .await?;
+         * */
+        let balance: (f32,) = sqlx::query_as(
+            "
+           SELECT sum(amount) FROM activities
+           WHERE source_account_id =?
+           AND owner_account_id =?
+           and timestamp <
+           ",
+        )
+        .bind(account_id)
+        .bind(account_id)
+        .bind(until)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(balance.0)
+    }
+}
